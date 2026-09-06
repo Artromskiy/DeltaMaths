@@ -102,7 +102,8 @@ Any change to the public API or the cross-project shader/runtime contract
 requires a new release version by default. Before merging such a change,
 increment the package version in `src/DeltaMaths/DeltaMaths.csproj` and create
 an annotated Git tag with the same numeric version using the `vMAJOR.MINOR.PATCH`
-form. For example, package version `0.0.10` is released as tag `v0.0.10`.
+form. Read the current value from the project file or the latest tag; do not
+copy a package version into this document.
 The tag and package version may differ only when the user explicitly requests
 an exception. Documentation-only, test-only and internal implementation
 changes do not require a version increment unless they alter the shipped
@@ -132,42 +133,12 @@ for one isolated warning. Refactor when several metrics remain over their
 limits, the issue persists across runs, or profiling identifies a hot path.
 
 
-## Package release
+## NuGet
 
-`DeltaMaths` is the publishable runtime package. The checked-in project version
-is `0.0.10`, and its matching release tag is `v0.0.10`. From this repository
-root, use a clean working tree and run the bounded release checks before
-packing:
-
-```bash
-./eng/check-layout.sh
-dotnet restore src/DeltaMaths/DeltaMaths.csproj
-dotnet build src/DeltaMaths/DeltaMaths.csproj -c Release --no-restore
-dotnet pack src/DeltaMaths/DeltaMaths.csproj -c Release --no-build \
-  --no-restore -o artifacts/package
-```
-
-Inspect the generated nuspec and package contents before publishing. GitHub
-NuGet.org requires an authenticated feed; do not put a token in the command
-line or commit it. Enter it interactively, or reuse a variable that was
- already exported by the calling environment, then push the exact package
- produced above:
-
-```bash
-if [[ -z "${NUGET_API_KEY:-}" ]]; then
-  read -r -s -p "NuGet API key: " NUGET_API_KEY
-  echo
-fi
-dotnet nuget push artifacts/package/DeltaMaths.0.0.10.nupkg \
-  --source https://api.nuget.org/v3/index.json \
-  --api-key "$NUGET_API_KEY" --skip-duplicate
-unset NUGET_API_KEY
-```
-
-The package version, project version, and release tag must match. A public API
-or shader-contract change requires incrementing the package version and adding
-the corresponding annotated `vMAJOR.MINOR.PATCH` tag before publishing. This
-workflow does not create or move tags.
+NuGet has only the workspace `dev` and `release` modes. Run them from the
+Furnace root as documented in
+[`docs/NUGET_WORKFLOW.md`](../docs/NUGET_WORKFLOW.md). `DeltaMathsGen` is an
+internal generator executable and is not a publishable package.
 
 `DeltaMathsGen` is intentionally not a publishable NuGet package. It is a
 `net8.0` executable used to regenerate DeltaMaths sources and the shader
