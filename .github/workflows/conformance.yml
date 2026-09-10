@@ -1,0 +1,274 @@
+name: CPU/GPU conformance
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: delta-maths-conformance-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  DOTNET_NOLOGO: 1
+  NUGET_PACKAGES: ${{ github.workspace }}/.nuget/packages
+
+jobs:
+  conformance:
+    name: CPU + Vulkan conformance (SwiftShader)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout DeltaMaths
+        uses: actions/checkout@v7
+        with:
+          path: DeltaMaths
+
+      - name: Checkout DeltaShader
+        uses: actions/checkout@v7
+        with:
+          repository: Artromskiy/DeltaShader
+          path: DeltaShader
+
+      - name: Checkout DeltaRender
+        uses: actions/checkout@v7
+        with:
+          repository: Artromskiy/DeltaRender
+          path: DeltaRender
+
+      - name: Checkout DeltaDiagnostics
+        uses: actions/checkout@v7
+        with:
+          repository: Artromskiy/DeltaDiagnostics
+          path: DeltaDiagnostics
+
+      - name: Checkout SwiftShader
+        uses: actions/checkout@v7
+        with:
+          repository: google/swiftshader
+          ref: 694585a05946e1ed49b6bd577ca6537cbb57f025
+          path: third_party/SwiftShader
+
+      - name: Install .NET 10 and Vulkan tools
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install shader and Vulkan build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake glslang-tools jq ninja-build ripgrep spirv-tools vulkan-tools
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: delta-maths-conformance-nuget-${{ runner.os }}-${{ hashFiles('DeltaMaths/**/*.csproj', 'DeltaShader/**/*.csproj', 'DeltaRender/**/*.csproj', 'DeltaDiagnostics/**/*.csproj') }}
+          restore-keys: delta-maths-conformance-nuget-${{ runner.os }}-
+
+      - name: Build SwiftShader Vulkan backend
+        run: |
+          set -euo pipefail
+          cmake -S third_party/SwiftShader -B third_party/SwiftShader/build \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build third_party/SwiftShader/build --target vk_swiftshader --parallel 2
+          swiftshader_library="$(find third_party/SwiftShader/build -type f -name 'libvk_swiftshader.so' -print -quit)"
+          test -n "$swiftshader_library"
+          swiftshader_manifest="$(find third_party/SwiftShader -type f -name 'vk_swiftshader_icd.json' -print -quit)"
+          test -n "$swiftshader_manifest"
+          swiftshader_library="$(realpath "$swiftshader_library")"
+          jq --arg library "$swiftshader_library" \
+            '.ICD.library_path = $library' "$swiftshader_manifest" > "$RUNNER_TEMP/vk_swiftshader_icd.json"
+          echo "SWIFTSHADER_ICD=$RUNNER_TEMP/vk_swiftshader_icd.json" >> "$GITHUB_ENV"
+
+      - name: Inspect selected Vulkan device
+        id: vulkan-device
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/conformance"
+          export VK_DRIVER_FILES="$SWIFTSHADER_ICD"
+          export DELTA_RENDER_VULKAN_DRIVER=swiftshader
+          vulkaninfo --summary > "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo-summary.txt"
+          vulkaninfo --json > "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo.json"
+          if ! rg -qi 'swiftshader' "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo-summary.txt"; then
+            echo "::error::Vulkan did not report the selected SwiftShader device; refusing an implicit driver fallback."
+            exit 1
+          fi
+          shader_float64="$(jq -r '[.. | objects | .shaderFloat64? | select(type == "boolean")] | any' \
+            "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo.json")"
+          echo "shaderFloat64=$shader_float64"
+          echo "shader_float64=$shader_float64" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare current first-party package feed
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          feed="$RUNNER_TEMP/delta-maths-conformance-feed"
+          mkdir -p "$feed"
+          restore_args=(
+            --source "$feed"
+            --source https://api.nuget.org/v3/index.json
+            --ignore-failed-sources
+            --disable-parallel
+            --disable-build-servers
+            -m:1
+            /p:UseSharedCompilation=false
+            -p:NuGetAudit=false
+          )
+          pack_args=(
+            -c Release
+            --no-restore
+            --output "$feed"
+            --disable-build-servers
+            -m:1
+            /p:UseSharedCompilation=false
+            -p:PackageVersion=99.0.0
+          )
+          pack_project() {
+            local project="$1"
+            dotnet restore "$project" "${restore_args[@]}"
+            dotnet pack "$project" "${pack_args[@]}"
+          }
+          pack_project DeltaMaths/src/DeltaMaths/DeltaMaths.csproj
+          pack_project DeltaDiagnostics/src/DeltaDiagnostics.Contract/Delta.Diagnostics.Contract.csproj
+          pack_project DeltaShader/src/DeltaShader.Contract/DeltaShader.Contract.csproj
+          pack_project DeltaRender/src/DeltaRender/DeltaRender.csproj
+          pack_project DeltaRender/src/DeltaRender.Vulkan/DeltaRender.Vulkan.csproj
+          echo "DELTA_CONFORMANCE_FEED=$feed" >> "$GITHUB_ENV"
+
+      - name: Build CPU conformance and shader tool
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          restore_args=(
+            --source "$DELTA_CONFORMANCE_FEED"
+            --source https://api.nuget.org/v3/index.json
+            --ignore-failed-sources
+            --disable-parallel
+            --disable-build-servers
+            -m:1
+            /p:UseSharedCompilation=false
+            -p:NuGetAudit=false
+          )
+          maths=DeltaMaths
+          conformance="$maths/tests/DeltaMaths.Conformance/DeltaMaths.Conformance.csproj"
+          shader_tool=DeltaShader/src/DeltaShader.Tool/DeltaShader.Tool.csproj
+          dotnet restore "$maths/src/DeltaMaths/DeltaMaths.csproj" "${restore_args[@]}"
+          dotnet restore "$conformance" "${restore_args[@]}"
+          dotnet restore "$shader_tool" "${restore_args[@]}"
+          dotnet build "$maths/src/DeltaMaths/DeltaMaths.csproj" -c Release --no-restore \
+            --disable-build-servers -m:1 /p:UseSharedCompilation=false -v:minimal
+          dotnet build "$conformance" -c Release --no-restore \
+            --disable-build-servers -m:1 /p:UseSharedCompilation=false -v:minimal
+          dotnet build "$shader_tool" -c Release --no-restore \
+            --disable-build-servers -m:1 /p:UseSharedCompilation=false -v:minimal
+
+      - name: Generate deterministic CPU conformance bundle
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          bundle=DeltaMaths/tests/DeltaMaths.Conformance/shader-conformance.json
+          dotnet run --project DeltaMaths/tests/DeltaMaths.Conformance/DeltaMaths.Conformance.csproj \
+            -c Release --no-build --no-restore -- \
+            --write-bundle "$bundle"
+          test -s "$bundle"
+          cp "$bundle" artifacts/conformance/shader-conformance.json
+
+      - name: Publish validated shader artifacts
+        id: shader-publisher
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -uo pipefail
+          output=artifacts/conformance/maths-shader-artifacts
+          mkdir -p "$output"
+          dotnet run --project DeltaShader/src/DeltaShader.Tool/DeltaShader.Tool.csproj \
+            -c Release --no-build --no-restore -- \
+            maths-conformance DeltaMaths \
+            --profile vulkan1.2 --spirv 1.5 --glsl 460 \
+            --optimize performance --out "$output" 2>&1 | tee artifacts/conformance/shader-publisher.log
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          if [[ ! -s "$output/index.json" ]]; then
+            echo "::error::DeltaShader did not produce a conformance index."
+            exit 1
+          fi
+          if (( status != 0 )); then
+            echo "::warning::DeltaShader reported blocked cases; the Render report will retain their diagnostics."
+          fi
+
+      - name: Build DeltaRender conformance runner
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          runner=DeltaRender/tools/DeltaRender.MathConformance/DeltaRender.MathConformance.csproj
+          dotnet restore "$runner" \
+            --source "$DELTA_CONFORMANCE_FEED" \
+            --source https://api.nuget.org/v3/index.json \
+            --ignore-failed-sources --disable-parallel --disable-build-servers \
+            -m:1 /p:UseSharedCompilation=false -p:NuGetAudit=false
+          dotnet build "$runner" -c Release --no-restore \
+            --disable-build-servers -m:1 /p:UseSharedCompilation=false -v:minimal
+
+      - name: Run DeltaRender Vulkan conformance runner
+        id: render-runner
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -uo pipefail
+          export VK_DRIVER_FILES="$SWIFTSHADER_ICD"
+          export DELTA_RENDER_VULKAN_DRIVER=swiftshader
+          report="$GITHUB_WORKSPACE/artifacts/conformance/render-report.json"
+          text_report="$GITHUB_WORKSPACE/artifacts/conformance/render-report.txt"
+          dotnet run --project DeltaRender/tools/DeltaRender.MathConformance/DeltaRender.MathConformance.csproj \
+            -c Release --no-build --no-restore -- \
+            --cases "$GITHUB_WORKSPACE/DeltaMaths/tests/DeltaMaths.Conformance/shader-conformance.json" \
+            --artifacts "$GITHUB_WORKSPACE/artifacts/conformance/maths-shader-artifacts" \
+            --report "$report" --text-report "$text_report" 2>&1 | \
+            tee "$GITHUB_WORKSPACE/artifacts/conformance/render-runner.log"
+          status=${PIPESTATUS[0]}
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          echo "DeltaRender conformance exit code: $status"
+
+      - name: Require Vulkan shaderFloat64 and executed double cases
+        if: always()
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          report=artifacts/conformance/render-report.json
+          if [[ ! -s "$report" ]]; then
+            echo "::error::DeltaRender did not produce the required conformance report."
+            exit 1
+          fi
+          double_cases="$(jq '[.Cases[] | select((.RequiredCapabilities // []) | index("float64"))] | length' "$report")"
+          double_passed="$(jq '[.Cases[] | select((.RequiredCapabilities // []) | index("float64")) | select(.Disposition == 0)] | length' "$report")"
+          double_excluded="$(jq '[.Cases[] | select((.RequiredCapabilities // []) | index("float64")) | select(.Disposition == 3)] | length' "$report")"
+          double_blocked="$(jq '[.Cases[] | select((.RequiredCapabilities // []) | index("float64")) | select(.Disposition != 0)] | length' "$report")"
+          echo "double cases=$double_cases passed=$double_passed blocked=$double_blocked excluded=$double_excluded"
+          failed=0
+          if [[ "${{ steps.vulkan-device.outputs.shader_float64 }}" != true ]]; then
+            echo "::error::Selected SwiftShader Vulkan device does not expose shaderFloat64=true; double conformance cannot execute."
+            failed=1
+          fi
+          if [[ "${{ steps.render-runner.outputs.exit_code }}" != 0 ]]; then
+            echo "::error::DeltaRender conformance runner returned ${{ steps.render-runner.outputs.exit_code }}."
+            failed=1
+          fi
+          if (( double_cases == 0 )); then
+            echo "::error::The conformance bundle contains no float64 cases."
+            failed=1
+          elif (( double_excluded != 0 || double_passed != double_cases )); then
+            echo "::error::At least one float64 case was skipped or failed; double conformance must be executed, never silently skipped."
+            failed=1
+          fi
+          if (( failed != 0 )); then
+            exit 1
+          fi
+
+      - name: Upload conformance artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: delta-maths-cpu-gpu-conformance-${{ github.run_number }}
+          path: artifacts/conformance
+          if-no-files-found: error
+          retention-days: 30
