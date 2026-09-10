@@ -48,7 +48,7 @@ done < <(
 while IFS= read -r documentation_path; do
     documentation_name="${documentation_path#"$repo_root/"}"
     case "$documentation_name" in
-        AGENTS.md|TODO.md|WORKFLOW.md|IDEAS.md)
+        README.md|AGENTS.md|TODO.md|WORKFLOW.md|IDEAS.md)
             ;;
         *)
             printf 'layout: root documentation must move to docs/: %s\n' \
