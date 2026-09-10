@@ -516,6 +516,8 @@ internal static class CanonicalValueEncoder
 
 internal static class ComparisonProfile
 {
+    private const double VulkanTrigonometricAbsoluteTolerance = 0.00048828125;
+
     internal static ComparisonProfileValue For(ContractFunction function)
     {
         if (IsQuaternion(function.ReturnTypeName))
@@ -531,6 +533,11 @@ internal static class ComparisonProfile
         if (IsDiscrete(function.MethodName))
         {
             return new ComparisonProfileValue("FloatDiscrete", 0.00001, 0.00001, 2);
+        }
+
+        if (IsTrigonometric(function.MethodName))
+        {
+            return new ComparisonProfileValue("FloatTranscendental", VulkanTrigonometricAbsoluteTolerance, 0.00002, 8);
         }
 
         if (IsTranscendental(function.MethodName))
@@ -552,6 +559,15 @@ internal static class ComparisonProfile
 
     private static bool IsDiscrete(string methodName) =>
         ContainsAny(methodName, "Equal", "NotEqual", "Less", "Greater", "Floor", "Ceil", "Round", "Truncate", "Step");
+
+    private static bool IsTrigonometric(string methodName) =>
+        methodName.Equals("Sin", StringComparison.OrdinalIgnoreCase)
+        || methodName.Equals("Cos", StringComparison.OrdinalIgnoreCase)
+        || methodName.Equals("Tan", StringComparison.OrdinalIgnoreCase)
+        || methodName.Equals("Asin", StringComparison.OrdinalIgnoreCase)
+        || methodName.Equals("Acos", StringComparison.OrdinalIgnoreCase)
+        || methodName.Equals("Atan", StringComparison.OrdinalIgnoreCase)
+        || methodName.Equals("Atan2", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsTranscendental(string methodName) =>
         ContainsAny(methodName, "Sin", "Cos", "Tan", "Asin", "Acos", "Atan", "Exp", "Log", "Sqrt", "Cbrt", "InverseSqrt", "Pow");
