@@ -182,12 +182,14 @@ jobs:
           set -uo pipefail
           output=artifacts/conformance/maths-shader-artifacts
           mkdir -p "$output"
+          set +e
           dotnet run --project DeltaShader/src/DeltaShader.Tool/DeltaShader.Tool.csproj \
             -c Release --no-build --no-restore -- \
             maths-conformance DeltaMaths \
             --profile vulkan1.2 --spirv 1.5 --glsl 460 \
             --optimize performance --out "$output" 2>&1 | tee artifacts/conformance/shader-publisher.log
           status=${PIPESTATUS[0]}
+          set -e
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           if [[ ! -s "$output/index.json" ]]; then
             echo "::error::DeltaShader did not produce a conformance index."
@@ -219,6 +221,7 @@ jobs:
           export DELTA_RENDER_VULKAN_DRIVER=swiftshader
           report="$GITHUB_WORKSPACE/artifacts/conformance/render-report.json"
           text_report="$GITHUB_WORKSPACE/artifacts/conformance/render-report.txt"
+          set +e
           dotnet run --project DeltaRender/tools/DeltaRender.MathConformance/DeltaRender.MathConformance.csproj \
             -c Release --no-build --no-restore -- \
             --cases "$GITHUB_WORKSPACE/DeltaMaths/tests/DeltaMaths.Conformance/shader-conformance.json" \
@@ -226,6 +229,7 @@ jobs:
             --report "$report" --text-report "$text_report" 2>&1 | \
             tee "$GITHUB_WORKSPACE/artifacts/conformance/render-runner.log"
           status=${PIPESTATUS[0]}
+          set -e
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
           echo "DeltaRender conformance exit code: $status"
 
