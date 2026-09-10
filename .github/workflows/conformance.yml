@@ -90,7 +90,7 @@ jobs:
           export VK_DRIVER_FILES="$SWIFTSHADER_ICD"
           export DELTA_RENDER_VULKAN_DRIVER=swiftshader
           vulkaninfo --summary > "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo-summary.txt"
-          vulkaninfo --json > "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo.json"
+          vulkaninfo --json -o "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo.json"
           if ! rg -qi 'swiftshader' "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo-summary.txt"; then
             echo "::error::Vulkan did not report the selected SwiftShader device; refusing an implicit driver fallback."
             exit 1
