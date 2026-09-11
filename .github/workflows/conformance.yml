@@ -64,7 +64,7 @@ jobs:
         id: vulkan-device
         run: |
           set -euo pipefail
-          lavapipe_icd="$(find /usr/share/vulkan/icd.d -type f -name 'lvp_icd.*.json' -print -quit)"
+          lavapipe_icd="$(find /usr/share/vulkan/icd.d -type f -name 'lvp_icd*.json' -print -quit)"
           if [[ -z "$lavapipe_icd" ]]; then
             echo "::error::The mesa-vulkan-drivers package did not provide an lvp ICD manifest."
             exit 1
