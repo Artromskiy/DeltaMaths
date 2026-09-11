@@ -18,7 +18,7 @@ env:
 
 jobs:
   conformance:
-    name: CPU + Vulkan conformance (SwiftShader)
+    name: CPU + Vulkan conformance (lavapipe)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -45,20 +45,13 @@ jobs:
           repository: Artromskiy/DeltaDiagnostics
           path: DeltaDiagnostics
 
-      - name: Checkout SwiftShader
-        uses: actions/checkout@v7
-        with:
-          repository: google/swiftshader
-          ref: 694585a05946e1ed49b6bd577ca6537cbb57f025
-          path: third_party/SwiftShader
-
       - name: Install .NET 10 and Vulkan tools
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
 
       - name: Install shader and Vulkan build tools
-        run: sudo apt-get update && sudo apt-get install -y cmake glslang-tools jq ninja-build ripgrep spirv-tools vulkan-tools
+        run: sudo apt-get update && sudo apt-get install -y glslang-tools jq mesa-vulkan-drivers ripgrep spirv-tools vulkan-tools
 
       - name: Cache NuGet packages
         uses: actions/cache@v6
@@ -67,38 +60,33 @@ jobs:
           key: delta-maths-conformance-nuget-${{ runner.os }}-${{ hashFiles('DeltaMaths/**/*.csproj', 'DeltaShader/**/*.csproj', 'DeltaRender/**/*.csproj', 'DeltaDiagnostics/**/*.csproj') }}
           restore-keys: delta-maths-conformance-nuget-${{ runner.os }}-
 
-      - name: Build SwiftShader Vulkan backend
-        run: |
-          set -euo pipefail
-          cmake -S third_party/SwiftShader -B third_party/SwiftShader/build \
-            -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build third_party/SwiftShader/build --target vk_swiftshader --parallel 2
-          swiftshader_library="$(find third_party/SwiftShader/build -type f -name 'libvk_swiftshader.so' -print -quit)"
-          test -n "$swiftshader_library"
-          swiftshader_manifest="$(find third_party/SwiftShader -type f -name 'vk_swiftshader_icd.json' -print -quit)"
-          test -n "$swiftshader_manifest"
-          swiftshader_library="$(realpath "$swiftshader_library")"
-          jq --arg library "$swiftshader_library" \
-            '.ICD.library_path = $library' "$swiftshader_manifest" > "$RUNNER_TEMP/vk_swiftshader_icd.json"
-          echo "SWIFTSHADER_ICD=$RUNNER_TEMP/vk_swiftshader_icd.json" >> "$GITHUB_ENV"
-
-      - name: Inspect selected Vulkan device
+      - name: Select lavapipe Vulkan backend
         id: vulkan-device
         run: |
           set -euo pipefail
+          lavapipe_icd="$(find /usr/share/vulkan/icd.d -type f -name 'lvp_icd.*.json' -print -quit)"
+          if [[ -z "$lavapipe_icd" ]]; then
+            echo "::error::The mesa-vulkan-drivers package did not provide an lvp ICD manifest."
+            exit 1
+          fi
+          echo "LAVAPIPE_ICD=$lavapipe_icd" >> "$GITHUB_ENV"
           mkdir -p "$GITHUB_WORKSPACE/artifacts/conformance"
-          export VK_DRIVER_FILES="$SWIFTSHADER_ICD"
-          export DELTA_RENDER_VULKAN_DRIVER=swiftshader
+          export VK_DRIVER_FILES="$lavapipe_icd"
+          export DELTA_RENDER_VULKAN_DRIVER=lavapipe
           vulkaninfo --summary > "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo-summary.txt"
           vulkaninfo --json -o "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo.json"
-          if ! rg -qi 'swiftshader' "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo-summary.txt"; then
-            echo "::error::Vulkan did not report the selected SwiftShader device; refusing an implicit driver fallback."
+          if ! rg -qi 'lavapipe|llvmpipe' "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo-summary.txt"; then
+            echo "::error::Vulkan did not report the selected lavapipe device; refusing an implicit driver fallback."
             exit 1
           fi
           shader_float64="$(jq -r '[.. | objects | .shaderFloat64? | select(type == "boolean")] | any' \
             "$GITHUB_WORKSPACE/artifacts/conformance/vulkaninfo.json")"
           echo "shaderFloat64=$shader_float64"
           echo "shader_float64=$shader_float64" >> "$GITHUB_OUTPUT"
+          if [[ "$shader_float64" != true ]]; then
+            echo "::error::The selected lavapipe device does not expose shaderFloat64; double conformance cannot be validated."
+            exit 1
+          fi
 
       - name: Prepare current first-party package feed
         working-directory: ${{ github.workspace }}
@@ -217,8 +205,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -uo pipefail
-          export VK_DRIVER_FILES="$SWIFTSHADER_ICD"
-          export DELTA_RENDER_VULKAN_DRIVER=swiftshader
+          export VK_DRIVER_FILES="$LAVAPIPE_ICD"
+          export DELTA_RENDER_VULKAN_DRIVER=lavapipe
           report="$GITHUB_WORKSPACE/artifacts/conformance/render-report.json"
           text_report="$GITHUB_WORKSPACE/artifacts/conformance/render-report.txt"
           set +e
@@ -247,23 +235,8 @@ jobs:
           double_passed="$(jq '[.Cases[] | select((.RequiredCapabilities // []) | index("float64")) | select(.Disposition == 0)] | length' "$report")"
           double_excluded="$(jq '[.Cases[] | select((.RequiredCapabilities // []) | index("float64")) | select(.Disposition == 3)] | length' "$report")"
           double_blocked="$(jq '[.Cases[] | select((.RequiredCapabilities // []) | index("float64")) | select(.Disposition != 0)] | length' "$report")"
-          non_double_failures="$(jq '[.Cases[] | select(((.RequiredCapabilities // []) | index("float64")) == null) | select(.Disposition == 1 or .Disposition == 2)] | length' "$report")"
           echo "double cases=$double_cases passed=$double_passed blocked=$double_blocked excluded=$double_excluded"
           runner_status="${{ steps.render-runner.outputs.exit_code }}"
-          if [[ "${{ steps.vulkan-device.outputs.shader_float64 }}" != true ]]; then
-            if (( non_double_failures != 0 )); then
-              echo "::error::DeltaRender conformance runner reported $non_double_failures non-double failures."
-              exit 1
-            fi
-            echo "::warning::Selected Vulkan device does not expose shaderFloat64; skipping $double_cases double cases."
-            {
-              echo "## Double conformance"
-              echo
-              echo "Skipped: the selected Vulkan device does not expose shaderFloat64."
-              echo "Reported double cases: $double_cases; capability-excluded: $double_excluded."
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
           failed=0
           if [[ "$runner_status" != 0 ]]; then
             echo "::error::DeltaRender conformance runner returned $runner_status."
